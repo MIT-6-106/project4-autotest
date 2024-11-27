@@ -1,0 +1,156 @@
+#!/usr/bin/python3
+
+import sys
+import os
+import os.path
+import subprocess
+import json
+import boto3
+import botocore
+import traceback
+
+
+
+from os.path import expanduser
+PATH_TO_CREDENTIALS_DIR = expanduser("~") + "/.6172_cloud"
+PATH_TO_CREDENTIALS = PATH_TO_CREDENTIALS_DIR+"/p4_cloud_credentials.pobj"
+def get_credentials():
+  credentials = eval(open(PATH_TO_CREDENTIALS).read())
+  return credentials
+global_credentials = get_credentials()
+def getuser():
+  return global_credentials["USERNAME"]
+
+
+
+
+
+# Server for getting list of binaries.
+list_server = "cloud9.csail.mit.edu:4040"
+
+# Define ANSI escape sequences.
+class ansi_esc:
+  RESET     = '\033[0m'
+  BOLD      = '\033[1m'
+  UNDERLINE = '\033[4m'
+  RED       = '\033[31m'
+  GREEN     = '\033[32m'
+  YELLOW    = '\033[33m'
+  BLUE      = '\033[34m'
+  MAGENTA   = '\033[35m'
+  CYAN      = '\033[36m'
+
+
+# Define wrappers for ANSI escape sequences.
+def term_bold(s):
+  return ansi_esc.BOLD      + s + ansi_esc.RESET
+def term_underline(s):
+  return ansi_esc.UNDERLINE + s + ansi_esc.RESET
+def term_red(s):
+  return ansi_esc.RED       + s + ansi_esc.RESET
+def term_green(s):
+  return ansi_esc.GREEN     + s + ansi_esc.RESET
+def term_yellow(s):
+  return ansi_esc.YELLOW    + s + ansi_esc.RESET
+def term_blue(s):
+  return ansi_esc.BLUE      + s + ansi_esc.RESET
+def term_magenta(s):
+  return ansi_esc.MAGENTA   + s + ansi_esc.RESET
+def term_cyan(s):
+  return ansi_esc.CYAN      + s + ansi_esc.RESET
+
+
+if __name__ == "__main__":
+  # Give basic calling convention if requested.
+  if len(sys.argv) != 2:
+    sys.stderr.write("Usage: {0} <limit>\n".format(os.path.basename(__file__)))
+    exit(1)
+
+  # Generate student's Athena user name.
+  try:
+    athena_user = str(getuser())
+  except Exception:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot get login name."
+    ))
+
+  # Fetch the list of binaries for the user.
+  print("Getting list of binaries...")
+  try:
+    response = subprocess.check_output(
+      "wget -q -O - '{}/list_autotest_binaries/{}'".format(
+        list_server,
+        athena_user),
+        universal_newlines=True,
+      shell = True)
+  except subprocess.CalledProcessError:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot contact list server '{}'.".format(list_server)
+    ))
+
+  # Parse the list of binaries out of the response.
+  response = response.strip()
+  response_parsed = response.split(':', 1)
+  if len(response_parsed) != 2 or response_parsed[0] != "BINARY_LIST":
+    exit(term_red(
+      "[SERVER ERROR] {}.".format(response)
+    ))
+  else:
+    binary_list = json.loads(response_parsed[1])
+
+  # Do nothing if list is empty.
+  if len(binary_list) == 0:
+    print(term_green("No binaries found."))
+    exit()
+
+  # Add list headers.
+  binary_list.insert(0, {
+    "name"     : "Bot Name",
+    "status"   : "Status",
+    "timestamp": "Timestamp"
+  })
+
+  # Compute the maximum length of any field.
+  max_len = {}
+  for k in binary_list[0]:
+    max_len[k] = len(max(binary_list, key = lambda b: len(b[k]))[k])
+  max_len["name"] = min(max_len["name"], 50)
+
+  # Generate the appropriate format specifiers for each field.
+  fmt_spec = {}
+  for k in max_len:
+    fmt_spec[k] = "{{{0}:{1}.{1}s}}".format(k, max_len[k])
+
+  # Generate the format specifier for a line.
+  line_fmt_spec = '   '.join([
+    fmt_spec["name"],
+    fmt_spec["status"],
+    fmt_spec["timestamp"]
+  ])
+  divider = '---'.join([
+    '-' * max_len["name"],
+    '-' * max_len["status"],
+    '-' * max_len["timestamp"]
+  ])
+
+  limit = 10
+  if len(sys.argv) < 2:
+    limit = 10
+  else:
+    limit = int(sys.argv[1])
+  running_total = 0
+  # Print the list.
+  print()
+  for i in range(len(binary_list)):
+    if running_total > limit:
+      break
+    running_total += 1
+    b = binary_list[i]
+    if i == 0:
+      print(term_green(line_fmt_spec.format(**b)))
+      print(term_green(divider))
+    else:
+      print(line_fmt_spec.format(**b))
+  print(term_green(divider))

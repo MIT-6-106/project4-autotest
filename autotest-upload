@@ -1,0 +1,190 @@
+#!/usr/bin/python3
+
+import sys
+import os
+import os.path
+import subprocess
+import boto3
+import botocore
+from boto3.session import Session
+import traceback
+
+
+from os.path import expanduser
+PATH_TO_CREDENTIALS_DIR = expanduser("~") + "/.6172_cloud"
+PATH_TO_CREDENTIALS = PATH_TO_CREDENTIALS_DIR+"/p4_cloud_credentials.pobj"
+def get_credentials():
+    with open(PATH_TO_CREDENTIALS) as f:
+        credentials = eval(f.read())
+    return credentials
+global_credentials = get_credentials()
+def getuser():
+  return global_credentials["USERNAME"]
+def get_aws_id():
+  return global_credentials["ID"]
+def get_aws_secret():
+  return global_credentials["SECRET"]
+
+
+
+# Amazon S3 bucket name.
+student_bucket = "6172-test-filesystem"
+
+# Key prefix for user folders in bucket.
+object_key_prefix = "userhome"
+
+# Key folder for bot binaries.
+object_key_binaries = "autotest_binary_uploads"
+
+# Server for registering binaries.
+reg_server = "cloud9.csail.mit.edu:4040"
+
+
+# Define ANSI escape sequences.
+class ansi_esc:
+  RESET     = '\033[0m'
+  BOLD      = '\033[1m'
+  UNDERLINE = '\033[4m'
+  RED       = '\033[31m'
+  GREEN     = '\033[32m'
+  YELLOW    = '\033[33m'
+  BLUE      = '\033[34m'
+  MAGENTA   = '\033[35m'
+  CYAN      = '\033[36m'
+
+
+# Define wrappers for ANSI escape sequences.
+def term_bold(s):
+  return ansi_esc.BOLD      + s + ansi_esc.RESET
+def term_underline(s):
+  return ansi_esc.UNDERLINE + s + ansi_esc.RESET
+def term_red(s):
+  return ansi_esc.RED       + s + ansi_esc.RESET
+def term_green(s):
+  return ansi_esc.GREEN     + s + ansi_esc.RESET
+def term_yellow(s):
+  return ansi_esc.YELLOW    + s + ansi_esc.RESET
+def term_blue(s):
+  return ansi_esc.BLUE      + s + ansi_esc.RESET
+def term_magenta(s):
+  return ansi_esc.MAGENTA   + s + ansi_esc.RESET
+def term_cyan(s):
+  return ansi_esc.CYAN      + s + ansi_esc.RESET
+
+
+if __name__ == "__main__":
+  # Give basic calling convention if requested.
+  if len(sys.argv) != 2 or sys.argv[1] == "-h" or sys.argv[1] == "--help":
+    sys.stderr.write("Usage: {0} BOT_PATH\n".format(os.path.basename(__file__)))
+    exit(1)
+
+  session = Session(aws_access_key_id = get_aws_id(), aws_secret_access_key = get_aws_secret(), region_name="us-east-1")
+  # Read the argument.
+  binary_path = sys.argv[1]
+
+  # Check for path existence.
+  try:
+    if not os.path.exists(binary_path):
+      exit(term_red(
+        "[ERROR] Path '{}' does not exist.".format(binary_path)
+      ))
+    if not os.path.isfile(binary_path):
+      exit(term_red(
+        "[ERROR] Path '{}' is not a file.".format(binary_path)
+      ))
+  except OSError:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot test path '{}' for existence.".format(binary_path)
+    ))
+
+  # Get the binary's basename.
+  try:
+    binary_basename = os.path.basename(binary_path)
+  except OSError:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot get basename for path '{}'.".format(binary_path)
+    ))
+
+  # Fetch the bucket.
+  #s3 = boto3.resource('s3')
+  s3 = session.resource('s3')
+  bucket = s3.Bucket(student_bucket)
+
+  # Test for bucket existence.
+  try:
+    s3.meta.client.head_bucket(Bucket = student_bucket)
+  except botocore.exceptions.ClientError as e:
+    error_code = int(e.response["Error"]["Code"])
+    if error_code == 404:
+      exit(term_red(
+        "[ERROR] Amazon S3 Bucket '{}' doesn't exist.".format(student_bucket)
+      ))
+    else:
+      traceback.print_exc(1)
+      exit(term_red(
+        "[ERROR] Cannot get Amazon S3 bucket."
+      ))
+
+  # Generate student's Amazon IAM username (on staff's account).
+  try:
+    athena_user = str(getuser())
+    iam_user = "student-" + athena_user
+  except Exception:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot get login name."
+    ))
+
+  # Upload the binary to the student bucket.
+  s3_client = session.client('s3')
+  upload_key = "/".join([
+    object_key_prefix,
+    iam_user,
+    object_key_binaries, 
+    binary_basename
+  ])
+  print("Uploading bot '{}' to '~/s3home/{}/{}' on instance...".format(
+    binary_basename, object_key_binaries, binary_basename))
+  try:
+    s3_client.upload_file(
+      binary_path, 
+      student_bucket,
+      upload_key,
+      ExtraArgs = {
+        "ACL": "bucket-owner-full-control"
+      }
+    )
+  except Exception:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot upload bot to Amazon S3 bucket."
+    ))
+
+  # Echo upload completion.
+  print(term_green("Upload complete!"))
+
+  # Register the binary with the server.
+  print("Registering bot '{}' with server...".format(binary_basename))
+  try:
+    response = subprocess.check_output(
+      "wget -q -O - '{}/upload/{}/{}'".format(
+        reg_server,
+        binary_basename.replace("'", "'\"'\"'"), 
+        athena_user),
+      shell = True, universal_newlines=True)
+  except subprocess.CalledProcessError:
+    traceback.print_exc(1)
+    exit(term_red(
+      "[ERROR] Cannot contact registration server '{}'.".format(reg_server)
+    ))
+
+  # Check response for server errors.
+  response = response.strip()
+  if len(response):
+    exit(term_red(
+      "[SERVER ERROR] {}.".format(response)
+    ))
+  else:
+    print(term_green("Registration success!"))
